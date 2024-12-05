@@ -2,6 +2,7 @@ import os
 import fnmatch
 import json
 import warnings
+import logging
 
 import datasets
 import torch
@@ -13,10 +14,15 @@ from transformers import (
     AutoTokenizer,
     HfArgumentParser,
 )
+from vllm import LLM
 
 from bigcode_eval.arguments import EvalArguments
 from bigcode_eval.evaluator import Evaluator
 from bigcode_eval.tasks import ALL_TASKS
+from bigcode_eval.vllm_utils import is_vllm_model
+
+logger = logging.getLogger(__name__)
+
 
 
 class MultiChoice:
@@ -210,6 +216,16 @@ def parse_args():
         action="store_true",
         help="Don't run generation but benchmark groundtruth (useful for debugging)",
     )
+    parser.add_argument(
+        "--use_vllm",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--vllm_tensor_parallel_size",
+        type=int,
+        default=1,
+    )
+
     return parser.parse_args()
 
 
@@ -292,31 +308,45 @@ def main():
                     model_kwargs["device_map"] = "auto"
                     print("Loading model in auto mode")
 
-        if args.modeltype == "causal":
-            model = AutoModelForCausalLM.from_pretrained(
-                args.model,
-                **model_kwargs,
-            )
-        elif args.modeltype == "seq2seq":
-            warnings.warn(
-                "Seq2Seq models have only been tested for HumanEvalPack & CodeT5+ models."
-            )
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                args.model,
-                **model_kwargs,
+        if args.use_vllm:
+            model = LLM(
+                model=args.model,
+                tensor_parallel_size=args.vllm_tensor_parallel_size,
+                dtype=dict_precisions[args.precision],
+                trust_remote_code=args.trust_remote_code,
+                # gpu_memory_utilization=args.gpu_memory_utilization,
+                # swap_space=args.swap_space,
+                # max_seq_len_to_capture=args.sequence_length_limit,
+                # max_model_len=args.sequence_length_limit,
+                max_seq_len_to_capture=args.max_length_generation,
+                max_model_len=args.max_length_generation,
             )
         else:
-            raise ValueError(
-                f"Non valid modeltype {args.modeltype}, choose from: causal, seq2seq"
-            )
+            if args.modeltype == "causal":
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.model,
+                    **model_kwargs,
+                )
+            elif args.modeltype == "seq2seq":
+                warnings.warn(
+                    "Seq2Seq models have only been tested for HumanEvalPack & CodeT5+ models."
+                )
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    args.model,
+                    **model_kwargs,
+                )
+            else:
+                raise ValueError(
+                    f"Non valid modeltype {args.modeltype}, choose from: causal, seq2seq"
+                )
 
-        if args.peft_model:
-            from peft import PeftModel  # dynamic import to avoid dependency on peft
+            if args.peft_model:
+                from peft import PeftModel  # dynamic import to avoid dependency on peft
 
-            model = PeftModel.from_pretrained(model, args.peft_model)
-            print("Loaded PEFT model. Merging...")
-            model.merge_and_unload()
-            print("Merge complete.")
+                model = PeftModel.from_pretrained(model, args.peft_model)
+                print("Loaded PEFT model. Merging...")
+                model.merge_and_unload()
+                print("Merge complete.")
 
         if args.left_padding:
             # left padding is required for some models like chatglm3-6b
@@ -359,6 +389,9 @@ def main():
             tokenizer.bos_token = "<s>"
             tokenizer.bos_token_id = 1
             print("Changing bos_token to <s>")
+
+        if is_vllm_model(model):
+            model.set_tokenizer(tokenizer=tokenizer)
 
         evaluator = Evaluator(accelerator, model, tokenizer, args)
 
