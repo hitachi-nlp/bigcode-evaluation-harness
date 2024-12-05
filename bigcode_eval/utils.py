@@ -4,10 +4,14 @@ import re
 import warnings
 from collections import defaultdict
 from typing import List, Optional
+import logging
 
 import torch
 from torch.utils.data import IterableDataset
 from tqdm import tqdm
+from vllm import SamplingParams
+
+from bigcode_eval.vllm_utils import is_vllm_model
 
 INFILL_MODE = False
 INSTRUCTION_MODE = False
@@ -269,59 +273,108 @@ def complete_code(
                 )
 
             inputs = batch["ids"][:, : batch["input_len"]] if tokenizer.padding_side == "right" else batch["ids"]
-            if "ids_encoder" in batch:
-                if is_wrapped:
-                    generated_tokens = accelerator.unwrap_model(model).generate(
-                        decoder_input_ids=inputs,
-                        input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
-                        num_return_sequences=batch_size,
-                        decoder_start_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        **gen_kwargs,
+            # each task is generated batch_size times
+            generated_tasks = batch["task_id"].repeat(batch_size)
+
+            if is_vllm_model(model):
+                vllm_gen_kwags = {
+                    'n': batch_size,
+                    'top_p': gen_kwargs["top_p"],
+                    'top_k': gen_kwargs["top_k"] or -1,  # -1 for disable
+                    'temperature': gen_kwargs["temperature"],
+                    'max_tokens': gen_kwargs["max_length"],
+                    # 'repetition_penalty': args.repetition_penalty,
+                    # 'frequency_penalty': args.frequency_penalty,
+                    # 'presence_penalty': args.presence_penalty,
+                    'stop': task.stop_words,
+                }
+                if INFILL_MODE:
+                    # Treat eos token as a regular stop word not removing it from the output
+                    # If it's removed it may have the effect of removing it in the middle of a
+                    # longer generation in case a batch size > 1 is used, which will result in
+                    # a wrong generation as it won't be used for splitting lateron
+                    sampling_params = SamplingParams(
+                        skip_special_tokens=False,
+                        spaces_between_special_tokens=True,
+                        **vllm_gen_kwags,
                     )
                 else:
-                    generated_tokens = model.generate(
-                        decoder_input_ids=inputs,
-                        input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
-                        num_return_sequences=batch_size,
-                        decoder_start_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        **gen_kwargs,
-                    )
+                    sampling_params = SamplingParams(
+                        **vllm_gen_kwags,
+                    )            
+                prompt_texts = tokenizer.batch_decode(inputs, skip_special_tokens=True)
+                batch_outputs = model.generate(prompt_texts, sampling_params=sampling_params)
+                generated_texts = [output.text
+                                   for batch_output in batch_outputs
+                                   for output in batch_output.outputs]
+
+                prompt_texts_repeated = [prompt_text for prompt_text in prompt_texts for _ in range(batch_size)]
+                generated_texts_with_prompts = [
+                    prompt + generated_text
+                    for prompt, generated_text in zip(prompt_texts_repeated, generated_texts)
+                ]
+
+                # gen_kwargs
+                # {'do_sample': True, 'temperature': 0.8, 'top_p': 0.95, 'top_k': 0, 'max_length': 512, 'stopping_criteria': [<bigcode_eval.generation.EndOfFunctionCriteria object at 0x1551d6585210>]}
+                generated_tokens = tokenizer.batch_encode_plus(
+                    generated_texts_with_prompts, padding=True, truncation=True, return_tensors="pt"
+                )["input_ids"]
+                # import pudb; pudb.set_trace()
+
             else:
-                if is_wrapped:
-                    # 8bit and 4bit models are wrapped in accelerator
-                    generated_tokens = accelerator.unwrap_model(model).generate(
-                        input_ids=inputs,
-                        num_return_sequences=batch_size,
-                        **gen_kwargs,
-                    )
-                else:
-                    # In transformers (>= 4.40.2), if the length of input_ids == max_length, a ValueError is thrown.
-                    # We want to ignore this error in order to reproduce old results with mbpp.
-                    try:
+                # import pudb; pudb.set_trace()
+                if "ids_encoder" in batch:
+                    if is_wrapped:
+                        generated_tokens = accelerator.unwrap_model(model).generate(
+                            decoder_input_ids=inputs,
+                            input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
+                            num_return_sequences=batch_size,
+                            decoder_start_token_id=tokenizer.pad_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                            **gen_kwargs,
+                        )
+                    else:
                         generated_tokens = model.generate(
+                            decoder_input_ids=inputs,
+                            input_ids=batch["ids_encoder"][:, : batch["input_len_encoder"]],
+                            num_return_sequences=batch_size,
+                            decoder_start_token_id=tokenizer.pad_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                            **gen_kwargs,
+                        )
+                else:
+                    if is_wrapped:
+                        # 8bit and 4bit models are wrapped in accelerator
+                        generated_tokens = accelerator.unwrap_model(model).generate(
                             input_ids=inputs,
                             num_return_sequences=batch_size,
                             **gen_kwargs,
                         )
-                    except ValueError as e:
-                        # When the length of input_ids == max_length, the generation is the same as the input
-                        if str(e).startswith(f"Input length of input_ids is {inputs.shape[1]}, but `max_length` is set to {gen_kwargs['max_length']}"):
-                            warnings.warn(f"An error with the following message was thrown: {e}. Returning the input as the generation, for higher scores consider using a larger `max_length`")
-                            generated_tokens = inputs
-                        else:
-                            raise e
+                    else:
+                        # In transformers (>= 4.40.2), if the length of input_ids == max_length, a ValueError is thrown.
+                        # We want to ignore this error in order to reproduce old results with mbpp.
+                        try:
+                            generated_tokens = model.generate(
+                                input_ids=inputs,
+                                num_return_sequences=batch_size,
+                                **gen_kwargs,
+                            )
+                        except ValueError as e:
+                            # When the length of input_ids == max_length, the generation is the same as the input
+                            if str(e).startswith(f"Input length of input_ids is {inputs.shape[1]}, but `max_length` is set to {gen_kwargs['max_length']}"):
+                                warnings.warn(f"An error with the following message was thrown: {e}. Returning the input as the generation, for higher scores consider using a larger `max_length`")
+                                generated_tokens = inputs
+                            else:
+                                raise e
 
-            # each task is generated batch_size times
-            generated_tasks = batch["task_id"].repeat(batch_size)
-            generated_tokens = accelerator.pad_across_processes(
-                generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
-            )
+                generated_tokens = accelerator.pad_across_processes(
+                    generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
+                )
 
-            generated_tokens, generated_tasks = accelerator.gather(
-                (generated_tokens, generated_tasks)
-            )
+                generated_tokens, generated_tasks = accelerator.gather(
+                    (generated_tokens, generated_tasks)
+                )
+
             generated_tokens = generated_tokens.cpu().numpy()
             generated_tasks = generated_tasks.cpu().numpy()
 
@@ -362,6 +415,9 @@ def complete_code(
         code_gens,
         gen_token_dict,
     )
+    # with open('code_gens.vllm.json', 'w') as f:
+    #     json.dump(code_gens, f)
+    # import pudb; pudb.set_trace()
 
     generations.extend(code_gens)
     return generations
