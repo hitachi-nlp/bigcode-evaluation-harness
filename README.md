@@ -1,4 +1,62 @@
-<h1 align="center">Code Generation LM Evaluation Harness</h1>
+# A Folk of Code Generation LM Evaluation Harness
+This is a folk of [bigcode-evaluation-harness](https://github.com/bigcode-project/bigcode-evaluation-harness) used in our paper [Enhancing Reasoning Capabilities of LLMs via Principled Synthetic Logic Corpus
+](https://arxiv.org/abs/2411.12498).
+We made it capable with [vllm](https://github.com/vllm-project/vllm), which enables much faster code generation.  
+
+For the basics of big-code-eval, such as installation, please refer to the original readme [below](#original-readme-of-code-generation-lm-evaluation-harness).
+
+
+
+
+## Release Branches
+* **(New!)** `NeurIPS_2024` branch (2024-12)
+    - We released the code for training LLMs.
+
+
+
+
+## Evaluating LLMs on the Benchmarks
+```console
+python ./bigcode-evaluation-harness/main.py \
+    --model {model_path} \
+    --tasks {task} \
+    --metric_output_path {output_json_path} \
+    --save_generations_path {generation_path} \
+    --save_references_path {reference_path} \
+    --vllm_tensor_parallel_size {num_gpus} \
+    --limit 500 \
+    --max_length_generation 512 \
+    --precision bf16 \
+    --use_auth_token \
+    --temperature 0.8 \
+    --do_sample True \
+    --n_samples 1 \
+    --batch_size 64 \
+    --trust_remote_code \
+    --allow_code_execution \
+    --save_generations \
+    --use_vllm
+```
+where `{task}` is specified from the following list:
+```python
+[
+    'humaneval',
+
+    'mbpp',
+    'mbppplus',
+
+    'multiple-cpp',
+    'multiple-js',
+    'multiple-go',
+]
+```
+
+
+
+
+
+
+<h1 align="center">Original Readme of Code Generation LM Evaluation Harness</h1>
 
 
 <h4 align="center">
