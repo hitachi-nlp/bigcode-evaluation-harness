@@ -41,10 +41,8 @@ where `{task}` is specified from the following list:
 ```python
 [
     'humaneval',
-
     'mbpp',
     'mbppplus',
-
     'multiple-cpp',
     'multiple-js',
     'multiple-go',
