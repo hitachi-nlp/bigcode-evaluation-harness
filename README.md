@@ -1,5 +1,5 @@
-# A Folk of Code Generation LM Evaluation Harness
-This is a folk of [bigcode-evaluation-harness](https://github.com/bigcode-project/bigcode-evaluation-harness) used in our paper [Enhancing Reasoning Capabilities of LLMs via Principled Synthetic Logic Corpus
+# A Fork of Code Generation LM Evaluation Harness
+This is a fork of [bigcode-evaluation-harness](https://github.com/bigcode-project/bigcode-evaluation-harness) used in our paper [Enhancing Reasoning Capabilities of LLMs via Principled Synthetic Logic Corpus
 ](https://arxiv.org/abs/2411.12498).
 We made it capable with [vllm](https://github.com/vllm-project/vllm), which enables much faster code generation.  
 
